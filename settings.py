@@ -112,7 +112,7 @@ def init_settings(app, base, cloud):
                 abort(429, '로그인 시도가 많습니다. 15분 뒤 다시 시도하세요.')
             password = str((request.get_json(silent=True) or {}).get('password', ''))
             stored = g.preferences.get('password_hash')
-            valid = check_password_hash(stored, password) if stored else secrets.compare_digest(password, '5162')
+            valid = check_password_hash(stored, password) if stored else secrets.compare_digest(password.encode('utf-8'), b'5162')
             if not valid:
                 conn.execute('INSERT INTO attempts VALUES(?,1,?) ON CONFLICT(address) DO UPDATE SET count=count+1', (address,time.time()))
                 # abort outside transaction so the counter is committed.

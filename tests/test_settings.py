@@ -142,3 +142,8 @@ def test_billing_window_keeps_totals(client):
         from flask import session
         assert session['billing']['count']==12 and len(session['billing']['recent'])==8
         assert round(session['billing']['usd'],3)==.024
+
+
+def test_non_ascii_password_returns_login_error(client):
+    assert login(client,'틀린비밀번호').status_code==401
+    assert login(client).status_code==200
