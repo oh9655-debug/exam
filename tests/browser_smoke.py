@@ -46,7 +46,7 @@ with sync_playwright() as p:
     assert '25.00' in page.locator('#calculated').inner_text()
     page.locator('#q-reason').fill('브라우저 검증: 교사가 단일 개념 기본 적용으로 판정')
     page.locator('#q-status').select_option('교사 검토 완료')
-    with page.expect_response(lambda r: '/api/questions/' in r.url and r.request.method=='PATCH') as saved:
+    with page.expect_response(lambda r: r.url.endswith('/api/workspace') and r.request.method=='POST') as saved:
         page.get_by_role('button',name='문항 저장 · 통계 갱신').click()
     assert saved.value.status==200
     page.wait_for_function("document.querySelector('#message').textContent.includes('저장했습니다')")
@@ -70,7 +70,7 @@ with sync_playwright() as p:
     # User-provided HTML is text, never executable markup.
     page.locator('#q-text').fill('<img src=x onerror="window.injected=true">')
     page.locator('#q-status').select_option('검토 필요')
-    with page.expect_response(lambda r: '/api/questions/' in r.url and r.request.method=='PATCH'):
+    with page.expect_response(lambda r: r.url.endswith('/api/workspace') and r.request.method=='POST'):
         page.get_by_role('button',name='문항 저장 · 통계 갱신').click()
     page.wait_for_function("document.querySelector('#message').textContent.includes('저장했습니다')")
     assert page.evaluate('window.injected === undefined')

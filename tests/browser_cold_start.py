@@ -1,0 +1,57 @@
+"""Run against rotating_server.py. Every request is a different server instance."""
+import os
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+root=Path(__file__).resolve().parents[1]
+with sync_playwright() as p:
+    browser=p.chromium.launch(headless=True,executable_path=os.environ.get('CHROMIUM_PATH','/usr/bin/chromium'))
+    page=browser.new_page(viewport={'width':1440,'height':1100});errors=[]
+    page.on('pageerror',lambda e:errors.append(str(e)))
+    page.goto('http://127.0.0.1:5000/settings')
+    page.locator('#password').fill('5162');page.get_by_role('button',name='관리자 로그인 →').click()
+    page.locator('#settings-panel').wait_for(state='visible')
+    page.locator('#api-key').fill('sk-fake-stateless-browser-test')
+    page.get_by_role('button',name='설정 저장',exact=True).click()
+    page.wait_for_function("document.querySelector('#key-state').textContent.includes('등록됨')")
+    page.goto('http://127.0.0.1:5000')
+    page.locator('[name=file]').set_input_files(str(root/'samples/sample-text.pdf'))
+    page.locator('[name=school]').fill('서버 교체 브라우저 검증중')
+    page.get_by_role('button',name='시험지 등록 및 로컬 인식 →').click()
+    page.locator('#question-list button').nth(2).wait_for()
+    assert page.locator('#question-list button').count()==3
+    page.get_by_role('button',name='외부 AI로 인식·분석',exact=True).click()
+    page.locator('#consent').wait_for(state='visible')
+    page.get_by_role('button',name='전송 및 유료 API 호출 승인').click()
+    page.wait_for_function("document.querySelector('#source').textContent.includes('AI 제안')")
+    assert page.locator('#question-list button').count()==1
+    page.locator('#q-reason').fill('서버를 매 요청 교체해도 유지되는 교사 수정')
+    page.locator('#q-status').select_option('교사 검토 완료')
+    with page.expect_response(lambda r:r.url.endswith('/api/workspace') and r.request.method=='POST') as saved:
+        page.get_by_role('button',name='문항 저장 · 통계 갱신').click()
+    assert saved.value.status==200,saved.value.text()
+    page.wait_for_function("document.querySelector('#message').textContent.includes('저장했습니다')")
+    page.get_by_role('button',name='수정 이력',exact=True).click()
+    page.locator('#history-list details').wait_for()
+    assert '서버를 매 요청 교체' in page.locator('#history-list').text_content()
+    page.get_by_role('button',name='← 시험지 목록').click()
+    page.reload();page.locator('#exam-list button').first.click()
+    page.wait_for_function("document.querySelector('#q-reason').value.includes('서버를 매 요청 교체')")
+    assert page.locator('#q-status').input_value()=='교사 검토 완료'
+    page.get_by_role('button',name='시험지 통계',exact=True).click()
+    assert '5.0점' in page.locator('#metrics').inner_text()
+    page.get_by_role('button',name='문항 검토',exact=True).click()
+    page.get_by_role('button',name='+ 문항 추가',exact=True).click()
+    page.locator('#q-text').fill('수동으로 추가한 문항')
+    page.get_by_role('button',name='문항 저장 · 통계 갱신').click()
+    page.wait_for_function("document.querySelectorAll('#question-list button').length===2")
+    page.once('dialog',lambda d:d.accept())
+    page.get_by_role('button',name='문항 삭제',exact=True).click()
+    page.wait_for_function("document.querySelectorAll('#question-list button').length===1")
+    page.goto('http://127.0.0.1:5000/settings')
+    page.locator('#settings-panel').wait_for(state='visible')
+    assert '1회' in page.locator('#usage-metrics').inner_text()
+    assert '분석 완료' in page.locator('#usage-table').inner_text()
+    assert not errors,errors
+    browser.close()
+    print('Cold-start browser passed: registration, mocked AI, cost history, teacher edit/history, reload, stats, add/delete, with an empty new server on EVERY request.')

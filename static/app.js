@@ -5,19 +5,38 @@ const levels = ['최하','하','중','상','최상'];
 let current=null, selected=null, exams=[], dirty=false, busy=false;
 function node(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n}
 function message(text,error=false){$('message').textContent=text;$('message').className=error?'error':'';$('message').hidden=false;clearTimeout(message.timer);message.timer=setTimeout(()=>$('message').hidden=true,10000)}
-async function api(url,options={}){const response=await fetch(url,{...options,headers:{'X-CSRF-Token':document.querySelector('meta[name=csrf-token]').content,...options.headers}});let data;try{data=await response.json()}catch{throw Error(response.status===413?'전송용 사본도 서버 제한을 초과했습니다. 원본은 변경하지 않았습니다. 페이지를 나눠 등록해 주세요.':'서버 응답을 받지 못했습니다. 새로고침 후 다시 확인하세요. 과금 여부는 사용 내역을 확인해 주세요.')} if(!response.ok)throw Error(data.error||'요청 실패');return data}
+async function networkApi(url,options={}){const response=await fetch(url,{...options,headers:{'X-CSRF-Token':document.querySelector('meta[name=csrf-token]').content,...options.headers}});let data;try{data=await response.json()}catch{throw Error(response.status===413?'전송용 사본도 서버 제한을 초과했습니다. 원본은 변경하지 않았습니다. 페이지를 나눠 등록해 주세요.':'서버 응답을 받지 못했습니다. 새로고침 후 다시 확인하세요. 과금 여부는 사용 내역을 확인해 주세요.')} if(!response.ok)throw Error(data.error||'요청 실패');return data}
+async function api(url,options={}){
+  const examMatch=url.match(/^\/api\/exams\/([0-9a-f]{32})(?:\/|$)/);
+  const questionMatch=url.match(/^\/api\/questions\/([0-9a-f]{32})(?:\/|$)/);
+  const eid=examMatch?.[1]||(questionMatch&&current?.questions.some(q=>q.id===questionMatch[1])?current.id:null);
+  if(eid){
+    const record=await ExamUpload.get(eid);
+    if(record?.snapshot&&record.transfer){
+      if((options.method||'GET')==='GET'&&url===`/api/exams/${eid}`)return record.snapshot;
+      const raw=JSON.stringify(record.snapshot);
+      if(new TextEncoder().encode(raw).length>700000)throw Error('문항과 수정 이력이 전송 한도를 넘었습니다. 원본을 보관하고 관리자에게 문의해 주세요.');
+      const body=new FormData();body.set('state',raw);body.set('file',record.transfer);body.set('path',url);body.set('method',options.method||'GET');body.set('payload',options.body||'null');
+      const result=await networkApi('/api/workspace',{method:'POST',body});
+      await ExamUpload.saveSnapshot(eid,result.exam);
+      return result.result;
+    }
+  }
+  return networkApi(url,options);
+}
+
 function json(method,data){return {method,headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}}
 async function action(button,fn){if(busy)return;busy=true;button.disabled=true;try{await fn()}catch(e){if(button.form?.id==='upload-form'){$('upload-progress').hidden=false;$('upload-progress').textContent=e.message}message(e.message,true)}finally{busy=false;button.disabled=false}}
 function canLeave(){return !dirty||confirm('저장하지 않은 문항 수정이 있습니다. 이동할까요?')}
 window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});
-async function list(){exams=await api('/api/exams');renderList();dashboardSummary()}
+async function list(){const local=await ExamUpload.listExams();let remote=[];try{remote=await networkApi('/api/exams')}catch(error){if(!local.length)throw error}exams=[...new Map([...remote,...local].map(e=>[e.id,e])).values()].sort((a,b)=>b.created.localeCompare(a.created));renderList();dashboardSummary()}
 function renderList(){const query=$('search').value.toLowerCase();$('exam-list').replaceChildren();$('exam-count').textContent=`${exams.length}개`;for(const e of exams.filter(e=>Object.values(e.metadata).join(' ').toLowerCase().includes(query))){const b=node('button',undefined,'exam-item');b.append(node('strong',`${e.metadata.school} · ${e.metadata.grade}학년 ${e.metadata.exam_type}`),node('span',`${e.metadata.year}년 ${e.metadata.semester}학기 · ${e.metadata.curriculum} · ${e.mode==='ai'?'AI 제안':'로컬 예비 인식'}`));b.onclick=()=>action(b,()=>open(e.id));$('exam-list').append(b)}if(!$('exam-list').children.length)$('exam-list').append(node('p','아직 등록한 시험지가 없습니다. 새 시험지 등록에서 시작하세요.','muted'))}
 $('search').oninput=renderList;
-$('upload-form').onsubmit=e=>{e.preventDefault();action(e.submitter,async()=>{const progress=text=>{$('upload-progress').hidden=false;$('upload-progress').textContent=text};const form=new FormData(e.target);const prepared=await ExamUpload.optimize(form.get('file'),progress);form.set('file',prepared.file);if(prepared.optimized){form.set('optimized','1');form.set('original_name',prepared.original.name);form.set('original_size',String(prepared.original.size));if(prepared.textPages)form.set('source_text',JSON.stringify(prepared.textPages))}progress('시험지 전송 및 문항 인식 중…');const result=await api('/api/exams',{method:'POST',body:form});try{await ExamUpload.attach(result.id,prepared)}catch{progress('등록은 완료됐지만 원본 연결을 마치지 못했습니다. 원본 파일은 PC에서 보관해 주세요.')}await list();await open(result.id)})};
+$('upload-form').onsubmit=e=>{e.preventDefault();action(e.submitter,async()=>{const progress=text=>{$('upload-progress').hidden=false;$('upload-progress').textContent=text};const form=new FormData(e.target);const prepared=await ExamUpload.optimize(form.get('file'),progress);form.set('file',prepared.file);if(prepared.optimized){form.set('optimized','1');form.set('original_name',prepared.original.name);form.set('original_size',String(prepared.original.size));if(prepared.textPages)form.set('source_text',JSON.stringify(prepared.textPages))}progress('시험지 전송 및 문항 인식 중…');const result=await api('/api/exams',{method:'POST',body:form});await ExamUpload.attach(result.id,prepared,result.exam);progress('브라우저에 시험지·문항 보관 완료');await list();await open(result.id)})};
 async function open(id){current=await api('/api/exams/'+id);$('dashboard').hidden=true;$('workspace').hidden=false;$('exam-title').textContent=`${current.metadata.school} · ${current.metadata.grade}학년 ${current.metadata.exam_type}`;$('exam-meta').textContent=`${current.metadata.year}년 ${current.metadata.semester}학기 / ${current.metadata.curriculum} / ${current.metadata.scope||'범위 미입력'}`;$('mode').textContent=current.mode==='ai'?'AI 제안 · 검토 전':'로컬 예비 인식 · AI 아님';$('notice').textContent=current.notice;$('original').href=`/api/exams/${id}/original`;$('page').replaceChildren();for(let p=1;p<=current.pages;p++){const o=node('option',`${p} / ${current.pages}`);o.value=p;$('page').append(o)}questionButtons();selectQuestion(current.questions[0]||null);if(!current.questions.length)page();showTab(false)}
 let pageRequest=0,oldImageUrl=null;
-async function page(){const seq=++pageRequest,id=current.id,p=Number($('page').value);if(oldImageUrl){URL.revokeObjectURL(oldImageUrl);oldImageUrl=null}try{if(current.metadata.optimized){const original=await ExamUpload.originalPage(id,p);if(seq!==pageRequest)return;if(original){$('page-image').src=original.url;if(original.revoke)oldImageUrl=original.url;$('source-heading').textContent='원본 시험지';$('source-note').textContent='이 브라우저에 보관한 변경 없는 원본입니다. AI 분석에는 업로드용 사본을 사용합니다.';return}}}catch{}if(seq!==pageRequest)return;$('page-image').src=`/api/exams/${id}/pages/${p}.png`;$('source-heading').textContent=current.metadata.optimized?'업로드용 사본':'원본 시험지';$('source-note').textContent=current.metadata.optimized?'용량을 줄인 사본입니다. 원본은 등록한 브라우저 또는 PC 파일에서 확인하세요. 작은 수식과 도형을 반드시 대조하세요.':'원본 페이지입니다. 문항의 수식·그림을 직접 대조하세요.';}
-$('original').onclick=async e=>{if(!current.metadata.optimized)return;e.preventDefault();if(!await ExamUpload.download(current.id)){message('이 브라우저에서 원본을 찾지 못했습니다. 등록할 때 사용한 PC 원본을 확인해 주세요.',true)}};
+async function page(){const seq=++pageRequest,id=current.id,p=Number($('page').value);if(oldImageUrl){URL.revokeObjectURL(oldImageUrl);oldImageUrl=null}try{{const original=await ExamUpload.originalPage(id,p);if(seq!==pageRequest)return;if(original){$('page-image').src=original.url;if(original.revoke)oldImageUrl=original.url;$('source-heading').textContent='원본 시험지';$('source-note').textContent=current.metadata.optimized?'이 브라우저에 보관한 변경 없는 원본입니다. AI 분석에는 업로드용 사본을 사용합니다.':'이 브라우저에 보관한 원본입니다. 시험지·문항·수정 이력을 브라우저에서 다시 열 수 있습니다.';return}}}catch{}if(seq!==pageRequest)return;$('page-image').src=`/api/exams/${id}/pages/${p}.png`;$('source-heading').textContent=current.metadata.optimized?'업로드용 사본':'원본 시험지';$('source-note').textContent=current.metadata.optimized?'용량을 줄인 사본입니다. 원본은 등록한 브라우저 또는 PC 파일에서 확인하세요. 작은 수식과 도형을 반드시 대조하세요.':'원본 페이지입니다. 문항의 수식·그림을 직접 대조하세요.';}
+$('original').onclick=async e=>{e.preventDefault();if(!await ExamUpload.download(current.id)){message('이 브라우저에서 원본을 찾지 못했습니다. 등록할 때 사용한 PC 원본을 확인해 주세요.',true)}};
 
 $('page').onchange=page;
 $('back').onclick=()=>{if(!canLeave())return;dirty=false;$('workspace').hidden=true;$('dashboard').hidden=false;list().catch(e=>message(e.message,true))};

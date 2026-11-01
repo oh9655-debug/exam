@@ -27,7 +27,7 @@
   async function optimize(file,progress){
     if(!file)throw Error('시험지 파일을 선택하세요.');
     if(file.size>MAX)throw Error('한 번에 최대 100MB까지 처리합니다. 원본을 페이지별로 나눠 주세요.');
-    if(file.size<=TARGET)return {file,optimized:false};
+    if(file.size<=TARGET){const pending='pending-'+crypto.randomUUID();await store(pending,{file,created:Date.now()});return {file,original:file,optimized:false,pending};}
     progress(`큰 파일 확인 중 · 원본 ${mb(file.size)}`);await tick();
     const signature=new Uint8Array(await file.slice(0,8).arrayBuffer());
     const isPdf=signature[0]===37&&signature[1]===80&&signature[2]===68&&signature[3]===70;
@@ -76,7 +76,13 @@
     progress(`전송 준비 완료 · ${mb(file.size)} → ${mb(output.size)} · 원본은 브라우저에 보관`);
     return {file:output,original:file,optimized:true,textPages,pending};
   }
-  async function attach(id,prepared){if(!prepared.optimized)return;await store(id,{file:prepared.original,created:Date.now()});const db=await storage();try{await new Promise((resolve,reject)=>{const t=db.transaction('files','readwrite');t.objectStore('files').delete(prepared.pending);t.oncomplete=resolve;t.onerror=reject})}finally{db.close()}}
+  async function attach(id,prepared,snapshot){
+    if(!snapshot)throw Error('시험지 등록 응답에 문항 자료가 없습니다. 새로고침 후 다시 등록해 주세요.');
+    await store(id,{file:prepared.original||prepared.file,transfer:prepared.file,snapshot,created:Date.now()});
+    const db=await storage();try{await new Promise((resolve,reject)=>{const t=db.transaction('files','readwrite');t.objectStore('files').delete(prepared.pending);t.oncomplete=resolve;t.onerror=reject})}finally{db.close()}
+  }
+  async function saveSnapshot(id,snapshot){const record=await get(id);if(!record)throw Error('브라우저 보관본이 없습니다. 원본을 다시 등록해 주세요.');await store(id,{...record,snapshot});}
+  async function listExams(){const db=await storage();try{return await new Promise((resolve,reject)=>{const r=db.transaction('files').objectStore('files').getAll();r.onsuccess=()=>resolve(r.result.filter(x=>x.snapshot).map(x=>x.snapshot));r.onerror=reject})}finally{db.close()}}
   async function originalPage(id,page){
     if(cachedId!==id){if(cachedDoc)await cachedDoc.destroy();cachedDoc=null;cachedId=id;}
     const record=await get(id);if(!record)return null;
@@ -86,5 +92,5 @@
     const blob=URL.createObjectURL(record.file);return {url:blob,original:true,revoke:true};
   }
   async function download(id){const record=await get(id);if(!record)return false;const url=URL.createObjectURL(record.file),a=document.createElement('a');a.href=url;a.download=record.file.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);return true;}
-  window.ExamUpload={optimize,attach,originalPage,download,get};
+  window.ExamUpload={optimize,attach,originalPage,download,get,saveSnapshot,listExams};
 })();

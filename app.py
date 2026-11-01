@@ -11,10 +11,11 @@ import sqlite3
 import uuid
 
 import fitz
-from flask import Flask, abort, jsonify, render_template, request, send_file, session, g
+from flask import Flask, abort, jsonify, render_template, request, send_file, session, g, make_response
 from werkzeug.exceptions import HTTPException
 from werkzeug.local import LocalProxy
 from analysis import difficulty, local_questions, vision_questions
+from workspace import export_exam, restore_exam
 from settings import init_settings, require_admin, selected_model, estimate, record_usage, finish_usage
 
 
@@ -35,7 +36,7 @@ def create_app(data_dir=None):
         if not secret_file.exists():
             secret_file.write_text(secrets.token_hex(32))
         app.secret_key = secret_file.read_text()
-    app.config.update(MAX_CONTENT_LENGTH=(4 if cloud else 30) * 1024 * 1024, SESSION_COOKIE_SAMESITE='Strict', SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SECURE=cloud, PERMANENT_SESSION_LIFETIME=timedelta(days=180), SESSION_REFRESH_EACH_REQUEST=False)
+    app.config.update(MAX_FORM_MEMORY_SIZE=800000, MAX_CONTENT_LENGTH=(4 if cloud else 30) * 1024 * 1024, SESSION_COOKIE_SAMESITE='Strict', SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SECURE=cloud, PERMANENT_SESSION_LIFETIME=timedelta(days=180), SESSION_REFRESH_EACH_REQUEST=False)
 
     @contextmanager
     def db():
@@ -83,7 +84,8 @@ def create_app(data_dir=None):
     @app.errorhandler(Exception)
     def error(exc):
         if isinstance(exc, HTTPException):
-            return jsonify(error=exc.description), exc.code
+            description = '시험지 자료를 찾지 못했습니다. 브라우저 보관본이 없는 이전 자료는 원본 파일로 다시 등록해 주세요.' if exc.code==404 else exc.description
+            return jsonify(error=description), exc.code
         if isinstance(exc, ValueError):
             return jsonify(error=str(exc)), 400
         app.logger.exception('Operation failed')
@@ -95,6 +97,9 @@ def create_app(data_dir=None):
         if not row:
             abort(404)
         return dict(row)
+
+    def input_data():
+        return g.workspace_payload if hasattr(g,'workspace_payload') else request.get_json()
 
     def validate(q, pages):
         clean = {}
@@ -208,16 +213,11 @@ def create_app(data_dir=None):
                 clean = validate(q,count)
                 clean.update(source='local', ai_snapshot=None)
                 conn.execute('INSERT INTO questions VALUES(?,?,?)',(uuid.uuid4().hex,eid,json.dumps(clean,ensure_ascii=False)))
-        return jsonify(id=eid), 201
+        return jsonify(id=eid,exam=export_exam(eid,db,exam_record)), 201
 
     @app.get('/api/exams/<eid>')
     def detail(eid):
-        e = exam_record(eid)
-        e['metadata'] = json.loads(e['metadata'])
-        with db() as conn:
-            rows = conn.execute('SELECT * FROM questions WHERE exam_id=? ORDER BY rowid', (eid,)).fetchall()
-        e['questions'] = [dict(id=r['id'], **json.loads(r['data'])) for r in rows]
-        return jsonify(e)
+        return jsonify(export_exam(eid,db,exam_record))
 
     @app.get('/api/exams/<eid>/pages/<int:page>.png')
     def page_image(eid,page):
@@ -238,7 +238,7 @@ def create_app(data_dir=None):
     @app.post('/api/exams/<eid>/questions')
     def add_question(eid):
         e = exam_record(eid)
-        q = validate(request.get_json(),e['pages'])
+        q = validate(input_data(),e['pages'])
         q.update(source='teacher',ai_snapshot=None)
         qid = uuid.uuid4().hex
         with db() as conn:
@@ -253,7 +253,7 @@ def create_app(data_dir=None):
                 abort(404)
             old = json.loads(row['data'])
             e = exam_record(row['exam_id'])
-            incoming = request.get_json()
+            incoming = input_data()
             q = validate({**old, **incoming},e['pages'])
             q.update(source=old['source'],ai_snapshot=old.get('ai_snapshot'))
             value = json.dumps(q,ensure_ascii=False)
@@ -290,7 +290,7 @@ def create_app(data_dir=None):
             if session.get('admin_until',0) <= time.time():
                 abort(401, '관리자 로그인 후 분석할 수 있습니다.')
         e = exam_record(eid)
-        if (request.get_json(silent=True) or {}).get('consent') is not True:
+        if (input_data() or {}).get('consent') is not True:
             raise ValueError('외부 전송 및 유료 API 사용 동의가 필요합니다.')
         # Keep this intentionally append-free: existing teacher work cannot be overwritten.
         with db() as conn:
@@ -337,6 +337,32 @@ def create_app(data_dir=None):
         except Exception:
             if usage_id: finish_usage(usage_id,False)
             raise
+
+    @app.post('/api/workspace')
+    def portable_workspace():
+        allowed={'detail','page_image','original','add_question','update_question','delete_question','history','analysis_estimate','analyze'}
+        target=request.form.get('path','')
+        method=request.form.get('method','GET').upper()
+        if method not in ('GET','POST','PATCH','DELETE'):
+            abort(400,'작업 형식을 확인하세요.')
+        try:
+            endpoint,values=app.url_map.bind('').match(target,method=method)
+        except HTTPException:
+            abort(400,'지원하지 않는 시험지 작업입니다.')
+        if endpoint not in allowed: abort(400,'지원하지 않는 시험지 작업입니다.')
+        file=request.files.get('file')
+        if not file: raise ValueError('브라우저에 보관된 사본을 찾지 못했습니다. 원본으로 다시 등록해 주세요.')
+        eid=restore_exam(request.form.get('state'),file.read(),root,db,validate)
+        if values.get('eid',eid)!=eid: abort(400,'시험지가 일치하지 않습니다.')
+        if 'qid' in values:
+            with db() as conn:
+                q=conn.execute('SELECT 1 FROM questions WHERE id=? AND exam_id=?',(values['qid'],eid)).fetchone()
+            if not q: abort(404)
+        try: g.workspace_payload=json.loads(request.form.get('payload','null'))
+        except ValueError: raise ValueError('문항 변경 내용을 읽지 못했습니다.')
+        result=make_response(app.view_functions[endpoint](**values))
+        if not result.is_json: return result
+        return jsonify(result=result.get_json(),exam=export_exam(eid,db,exam_record)),result.status_code
 
     return app
 

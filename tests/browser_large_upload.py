@@ -41,9 +41,9 @@ with tempfile.TemporaryDirectory() as temp:
         page.wait_for_function("document.querySelector('#source-note').textContent.includes('변경 없는 원본')")
         actual=page.evaluate('''async id=>{const x=await ExamUpload.get(id);const b=await crypto.subtle.digest('SHA-256',await x.file.arrayBuffer());return [...new Uint8Array(b)].map(n=>n.toString(16).padStart(2,'0')).join('')}''',eid)
         assert actual==expected
-        original_response=page.request.get(f'http://127.0.0.1:5000/api/exams/{eid}/original')
-        assert len(original_response.body())<3*1024*1024
-        assert len(original_response.body())<path.stat().st_size
+        transfer_size=page.evaluate('async id=>(await ExamUpload.get(id)).transfer.size',eid)
+        assert transfer_size<3*1024*1024
+        assert transfer_size<path.stat().st_size
         with page.expect_download() as download:
             page.get_by_text('원본 다운로드',exact=True).click()
         assert hashlib.sha256(Path(download.value.path()).read_bytes()).hexdigest()==expected
@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory() as temp:
         page.locator('#exam-list button').first.click()
         page.wait_for_function("document.querySelector('#source-note').textContent.includes('변경 없는 원본')")
         assert not errors,errors
-        print(f'Large PDF passed: {path.stat().st_size:,} bytes -> {len(original_response.body()):,} bytes, 2 text questions, exact original download and reload.')
+        print(f'Large PDF passed: {path.stat().st_size:,} bytes -> {transfer_size:,} bytes, 2 text questions, exact original download and reload.')
         image_path=Path(temp)/'large-image.png'
         image_data=rng.randbytes(1600*2400*3).translate(bytes(240+(i%16) for i in range(256)))
         large_pix=fitz.Pixmap(fitz.csRGB,1600,2400,image_data,False)
