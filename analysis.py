@@ -47,10 +47,10 @@ def local_questions(pages):
     return questions
 
 
-def vision_questions(images, metadata):
-    key = os.environ.get('EXAM_OPENAI_API_KEY', '')
+def vision_questions(images, metadata, *, key=None, model=None, on_usage=None):
+    key = key or os.environ.get('EXAM_OPENAI_API_KEY', '')
     if not key:
-        raise ValueError('EXAM_OPENAI_API_KEY 설정이 필요합니다. API 키를 채팅에 입력하지 마세요.')
+        raise ValueError('설정 메뉴에서 OpenAI API 키를 등록하세요.')
     instructions = '''중학교 수학 시험지를 분석한다. 원본의 수식과 그림을 추측하거나 고치지 말 것.
 불명확한 부분은 [인식 불확실]로 표시한다. 여러 페이지에 걸친 문항은 연결한다.
 일반적인 해당 학년 학생의 교육과정 내 자연스러운 풀이 기준으로 평가한다.
@@ -63,7 +63,10 @@ warning(인식 또는 교육과정 불확실성), factors(개념 복잡성, 추�
 소문항은 text에 보존. 모든 결과는 교사 검토 전 제안이다. 시험 정보: '''
     content = [{'type': 'text', 'text': instructions + json.dumps(metadata, ensure_ascii=False)}]
     content += [{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(p).decode()}} for p in images]
-    payload = dict(model=os.environ.get('EXAM_OPENAI_MODEL', 'gpt-4.1-mini'), messages=[{'role': 'user', 'content': content}], response_format={'type': 'json_object'})
+    payload = dict(model=model or os.environ.get('EXAM_OPENAI_MODEL', 'gpt-4.1-mini'), messages=[{'role': 'user', 'content': content}], response_format={'type': 'json_object'})
+    payload['max_completion_tokens'] = 12000
+    if payload['model'].startswith('gpt-5'):
+        payload['reasoning_effort'] = 'low'
     request = urllib.request.Request('https://api.openai.com/v1/chat/completions', data=json.dumps(payload).encode(), headers={'Authorization': 'Bearer '+key, 'Content-Type': 'application/json'})
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
@@ -73,6 +76,10 @@ warning(인식 또는 교육과정 불확실성), factors(개념 복잡성, 추�
         raise ValueError(messages.get(exc.code, 'AI 서비스 요청이 실패했습니다. 기존 문항은 유지됩니다.')) from None
     except (urllib.error.URLError, TimeoutError):
         raise ValueError('AI 서비스에 연결하지 못했거나 시간 제한을 초과했습니다. 기존 문항은 유지됩니다.') from None
+    if on_usage:
+        on_usage(result.get('usage'))
+    if result['choices'][0].get('finish_reason') not in (None, 'stop'):
+        raise ValueError('모델 응답이 중단되었습니다. 페이지 수를 줄여 새 시험지로 시도하세요. 사용 비용은 기록했습니다.')
     items = json.loads(result['choices'][0]['message']['content'])['questions']
     if not isinstance(items, list) or len(items) > 200:
         raise ValueError('AI 응답의 문항 목록이 올바르지 않습니다.')

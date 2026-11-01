@@ -6,7 +6,7 @@ GitHub `oh9655-debug/exam` 저장소를 Vercel의 Add New → Project에서 Impo
 - Framework Preset: Other. 저장소의 vercel.json에 Python 함수 라우팅이 정의되어 있습니다.
 - Build Command / Output Directory: 별도 override 없이 기본값
 - Environment Variables: `EXAM_SESSION_SECRET`에 본인이 생성한 32자 이상의 무작위 문자열을 입력하세요. Python으로 생성하려면 `python -c "import secrets; print(secrets.token_hex(32))"`를 사용합니다. 생성값은 GitHub에 올리지 마세요.
-- API 키는 설정하지 않습니다. Vercel 배포에서는 화면과 서버 양쪽에서 AI 호출을 차단합니다.
+- 분석용 API 키는 Vercel 환경변수에 넣지 않습니다. 배포된 프로그램의 관리자 설정에서 비밀번호 5162로 로그인한 뒤 등록합니다. 자세한 내용은 AI_SETTINGS.md를 참고하세요.
 - Deploy를 누르세요. Python 의존성은 requirements.txt에서 설치됩니다.
 
 배포 후 samples/sample-text.pdf를 내려받아 업로드 → 문항 수정 → 통계를 확인하세요. 실제 Vercel 배포는 사용자 계정에서 진행해야 하며, 이 문서 자체가 배포 성공을 의미하지 않습니다.

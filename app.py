@@ -1,18 +1,21 @@
 import io
+from datetime import timedelta
 from contextlib import contextmanager
 import json
 import math
 import os
 from pathlib import Path
 import secrets
+import time
 import sqlite3
 import uuid
 
 import fitz
-from flask import Flask, abort, jsonify, render_template, request, send_file, session
+from flask import Flask, abort, jsonify, render_template, request, send_file, session, g
 from werkzeug.exceptions import HTTPException
 from werkzeug.local import LocalProxy
 from analysis import difficulty, local_questions, vision_questions
+from settings import init_settings, require_admin, selected_model, estimate, record_usage, finish_usage
 
 
 def create_app(data_dir=None):
@@ -32,7 +35,7 @@ def create_app(data_dir=None):
         if not secret_file.exists():
             secret_file.write_text(secrets.token_hex(32))
         app.secret_key = secret_file.read_text()
-    app.config.update(MAX_CONTENT_LENGTH=(4 if cloud else 30) * 1024 * 1024, SESSION_COOKIE_SAMESITE='Strict', SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SECURE=cloud)
+    app.config.update(MAX_CONTENT_LENGTH=(4 if cloud else 30) * 1024 * 1024, SESSION_COOKIE_SAMESITE='Strict', SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SECURE=cloud, PERMANENT_SESSION_LIFETIME=timedelta(days=180), SESSION_REFRESH_EACH_REQUEST=False)
 
     @contextmanager
     def db():
@@ -65,8 +68,10 @@ def create_app(data_dir=None):
             initialize()
         if 'csrf' not in session:
             session['csrf'] = secrets.token_hex(24)
-        if request.method in ('POST', 'PATCH', 'DELETE') and not secrets.compare_digest(request.headers.get('X-CSRF-Token', ''), session['csrf']):
+        if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and not secrets.compare_digest(request.headers.get('X-CSRF-Token', ''), session['csrf']):
             abort(403, '화면을 새로고침한 뒤 다시 시도하세요.')
+
+    init_settings(app, base, cloud)
 
     @app.after_request
     def headers(response):
@@ -128,6 +133,10 @@ def create_app(data_dir=None):
     @app.get('/')
     def index():
         return render_template('index.html', csrf=session['csrf'], cloud=cloud)
+
+    @app.get('/settings')
+    def settings_page():
+        return render_template('settings.html',csrf=session['csrf'])
 
     @app.get('/api/exams')
     def exams():
@@ -243,10 +252,20 @@ def create_app(data_dir=None):
             rows = conn.execute('SELECT * FROM revisions WHERE question_id=? ORDER BY id DESC',(qid,)).fetchall()
         return jsonify([dict(created=r['created'],before=json.loads(r['before_data']),after=json.loads(r['after_data'])) for r in rows])
 
+    @app.get('/api/exams/<eid>/estimate')
+    @require_admin
+    def analysis_estimate(eid):
+        e = exam_record(eid)
+        return jsonify(**estimate(e['pages'],selected_model()),key_configured=bool(g.preferences.get('key')))
+
     @app.post('/api/exams/<eid>/analyze')
     def analyze(eid):
-        if cloud:
-            abort(403, '이번 Vercel 체험 배포에서는 외부 AI 호출을 사용하지 않습니다.')
+        managed = bool(g.preferences.get('key'))
+        if cloud or managed:
+            if not managed:
+                abort(403, '관리자 설정에서 API 키를 등록하세요.')
+            if session.get('admin_until',0) <= time.time():
+                abort(401, '관리자 로그인 후 분석할 수 있습니다.')
         e = exam_record(eid)
         if (request.get_json(silent=True) or {}).get('consent') is not True:
             raise ValueError('외부 전송 및 유료 API 사용 동의가 필요합니다.')
@@ -263,20 +282,38 @@ def create_app(data_dir=None):
             raise ValueError('MVP AI 인식은 비용·처리량 제한을 위해 최대 10페이지입니다.')
         with fitz.open(root / eid / 'preview.pdf') as doc:
             images = [p.get_pixmap(matrix=fitz.Matrix(min(1.5,2000/max(p.rect.width,p.rect.height)),min(1.5,2000/max(p.rect.width,p.rect.height)))).tobytes('png') for p in doc]
-        items = vision_questions(images,json.loads(e['metadata']))
-        if not items:
-            raise ValueError('AI가 문항을 찾지 못했습니다. 원본을 확인하고 수동 입력하세요.')
-        cleaned = []
-        for q in items:
-            clean = validate(q,e['pages'])
-            clean.update(source='ai',ai_snapshot=dict(clean))
-            cleaned.append(clean)
-        with db() as conn:
-            conn.execute('DELETE FROM questions WHERE exam_id=?',(eid,))
-            for q in cleaned:
-                conn.execute('INSERT INTO questions VALUES(?,?,?)',(uuid.uuid4().hex,eid,json.dumps(q,ensure_ascii=False)))
-            conn.execute("UPDATE exams SET mode='ai',notice=? WHERE id=?",('AI 제안입니다. 교사 검토 후 확정하세요.',eid))
-        return jsonify(ok=True)
+        usage_id = None
+        def received_usage(usage):
+            nonlocal usage_id
+            usage_id = record_usage(eid, selected_model(), usage)
+        try:
+            if managed:
+                items = vision_questions(images,json.loads(e['metadata']),key=g.preferences['key'],model=selected_model()['id'],on_usage=received_usage)
+            else:
+                items = vision_questions(images,json.loads(e['metadata']))
+        except Exception:
+            if managed:
+                if usage_id is None: usage_id = record_usage(eid,selected_model())
+                finish_usage(usage_id,False)
+            raise
+        try:
+            if not items:
+                raise ValueError('AI가 문항을 찾지 못했습니다. 원본을 확인하고 수동 입력하세요.')
+            cleaned = []
+            for q in items:
+                clean = validate(q,e['pages'])
+                clean.update(source='ai',ai_snapshot=dict(clean))
+                cleaned.append(clean)
+            with db() as conn:
+                conn.execute('DELETE FROM questions WHERE exam_id=?',(eid,))
+                for q in cleaned:
+                    conn.execute('INSERT INTO questions VALUES(?,?,?)',(uuid.uuid4().hex,eid,json.dumps(q,ensure_ascii=False)))
+                conn.execute("UPDATE exams SET mode='ai',notice=? WHERE id=?",('AI 제안입니다. 교사 검토 후 확정하세요.',eid))
+            if usage_id: finish_usage(usage_id,True)
+            return jsonify(ok=True,billing=session.get('billing',{}))
+        except Exception:
+            if usage_id: finish_usage(usage_id,False)
+            raise
 
     return app
 
