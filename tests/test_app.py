@@ -209,3 +209,19 @@ def test_vercel_requires_stable_secret(tmp_path,monkeypatch):
     monkeypatch.setenv('VERCEL','1')
     monkeypatch.delenv('EXAM_SESSION_SECRET',raising=False)
     with pytest.raises(RuntimeError): create_app(tmp_path)
+
+
+def test_optimized_upload_preserves_text_and_marks_copy(client):
+    folder=Path(__file__).resolve().parents[1]/'samples'
+    r=post(client,'/api/exams',data=dict(school='큰 파일',grade='2',year='2026',semester='2',optimized='1',original_name='large.pdf',original_size='9000000',source_text=json.dumps(['1. 방정식 x=2 [5점]','2. 함수 y=x [5점]']),file=(io.BytesIO((folder/'sample-scan.pdf').read_bytes()),'transfer.pdf')),content_type='multipart/form-data')
+    assert r.status_code==201,r.json
+    e=client.get('/api/exams/'+r.json['id']).json
+    assert len(e['questions'])==2 and e['metadata']['optimized'] is True
+    assert e['metadata']['original_size']==9000000
+    assert '사본' in e['notice'] and e['questions'][0]['points']==5
+
+
+def test_optimized_upload_rejects_page_mismatch(client):
+    folder=Path(__file__).resolve().parents[1]/'samples'
+    r=post(client,'/api/exams',data=dict(school='검증',grade='1',year='2026',semester='1',optimized='1',original_size='9000000',source_text=json.dumps(['one page']),file=(io.BytesIO((folder/'sample-scan.pdf').read_bytes()),'transfer.pdf')),content_type='multipart/form-data')
+    assert r.status_code==400

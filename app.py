@@ -177,8 +177,31 @@ def create_app(data_dir=None):
             raise
         except Exception as exc:
             raise ValueError('손상되었거나 읽을 수 없는 파일입니다.') from exc
+        optimized = request.form.get('optimized') == '1'
+        if optimized:
+            original_name = request.form.get('original_name', '')[:200]
+            try:
+                original_size = int(request.form.get('original_size', '0'))
+            except ValueError:
+                raise ValueError('원본 파일 정보를 확인하세요.')
+            if not 0 < original_size <= 100*1024*1024:
+                raise ValueError('원본은 100MB 이하 파일을 사용하세요.')
+            meta.update(optimized=True,original_name=original_name,original_size=original_size)
+            raw_text = request.form.get('source_text')
+            if raw_text:
+                if len(raw_text.encode('utf-8')) > 250000:
+                    raise ValueError('텍스트 추출 결과가 너무 큽니다.')
+                try:
+                    source_pages = json.loads(raw_text)
+                except ValueError:
+                    raise ValueError('PDF 텍스트 정보를 읽을 수 없습니다.')
+                if not isinstance(source_pages,list) or len(source_pages)!=count or any(not isinstance(x,str) or len(x)>10000 for x in source_pages):
+                    raise ValueError('PDF 텍스트의 페이지 정보를 확인하세요.')
+                pages = source_pages
         qs = local_questions(pages)
         notice = '로컬 예비 인식: AI 분석이 아닙니다. 모든 문항을 원본과 대조하세요.' if qs else '문항을 자동 인식하지 못했습니다. 스캔·이미지는 AI 인식 설정 또는 수동 문항 추가가 필요합니다.'
+        if optimized:
+            notice += ' 큰 파일의 업로드용 사본입니다. 변경 없는 원본은 등록한 브라우저에만 보관됩니다. AI는 사본을 사용하므로 작은 수식·도형을 원본과 대조하세요.'
         with db() as conn:
             conn.execute('INSERT INTO exams(id,metadata,filename,pages,mode,notice) VALUES(?,?,?,?,?,?)', (eid,json.dumps(meta,ensure_ascii=False),'original.'+ext,count,'local',notice))
             for q in qs:
@@ -210,7 +233,7 @@ def create_app(data_dir=None):
     @app.get('/api/exams/<eid>/original')
     def original(eid):
         e = exam_record(eid)
-        return send_file(root / eid / e['filename'],as_attachment=True)
+        return send_file(root / eid / e['filename'],as_attachment=True,download_name=('upload-copy'+Path(e['filename']).suffix) if json.loads(e['metadata']).get('optimized') else e['filename'])
 
     @app.post('/api/exams/<eid>/questions')
     def add_question(eid):

@@ -1,3 +1,8 @@
 *.pdf binary
 *.png binary
 *.jpg binary
+*.bcmap binary
+*.pfb binary
+*.ttf binary
+# Keep third-party source and license text unmodified.
+static/vendor/** whitespace=-trailing-space,-blank-at-eof
