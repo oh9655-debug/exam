@@ -174,6 +174,15 @@ def init_settings(app, base, cloud):
         g.preferences=candidate;g.preferences_changed=True
         return jsonify(ok=True,key_configured=bool(candidate['key']))
 
+    @bp.post('/api/ai/estimate')
+    @require_admin
+    def estimate_without_file():
+        data=request.get_json(silent=True) or {}
+        pages=data.get('pages')
+        if type(pages) is not int or not 1 <= pages <= 10:
+            raise ValueError('한 번에 분석할 페이지는 1~10페이지여야 합니다.')
+        return jsonify(**estimate(pages,selected_model()),key_configured=bool(g.preferences.get('key')))
+
     @bp.get('/api/ai/status')
     def status():
         return jsonify(configured=bool(g.preferences.get('key')), model=selected_model()['name'],

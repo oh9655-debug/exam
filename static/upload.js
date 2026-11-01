@@ -18,9 +18,10 @@
     }
     return window.PDFLib;
   }
-  function storage() { return new Promise((resolve,reject)=>{const r=indexedDB.open('mathgyul-originals',1);r.onupgradeneeded=()=>r.result.createObjectStore('files');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(Error('원본을 보관할 브라우저 저장 공간을 사용할 수 없습니다.'))}) }
-  async function store(key,value) {const db=await storage();try{await new Promise((resolve,reject)=>{const t=db.transaction('files','readwrite');t.objectStore('files').put(value,key);t.oncomplete=resolve;t.onerror=()=>reject(Error('브라우저 원본 보관 공간이 부족합니다. 원본 파일은 변경하지 않았습니다.'))})}finally{db.close()} }
-  async function get(key){const db=await storage();try{return await new Promise((resolve,reject)=>{const r=db.transaction('files').objectStore('files').get(key);r.onsuccess=()=>resolve(r.result);r.onerror=reject})}finally{db.close()}}
+  function bounded(promise,label,ms=10000){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error(label+' 시간이 초과됐습니다. 다른 탭을 닫고 다시 시도하세요.')),ms);promise.then(v=>{clearTimeout(timer);resolve(v)},e=>{clearTimeout(timer);reject(e)})})}
+  function storage(){return new Promise((resolve,reject)=>{let ended=false;const timer=setTimeout(()=>{ended=true;reject(Error('브라우저 저장소 연결이 10초를 초과했습니다. 다른 탭을 닫고 다시 시도하세요.'))},10000);const r=indexedDB.open('mathgyul-originals',1);r.onupgradeneeded=()=>r.result.createObjectStore('files');r.onsuccess=()=>{clearTimeout(timer);if(ended)r.result.close();else resolve(r.result)};r.onblocked=()=>{ended=true;clearTimeout(timer);reject(Error('다른 탭이 브라우저 저장소를 사용 중입니다. 다른 수학결 탭을 닫고 다시 시도하세요.'))};r.onerror=()=>{clearTimeout(timer);reject(Error('원본을 보관할 브라우저 저장 공간을 사용할 수 없습니다.'))}})}
+  async function store(key,value){const db=await storage();try{await bounded(new Promise((resolve,reject)=>{const t=db.transaction('files','readwrite');t.objectStore('files').put(value,key);t.oncomplete=resolve;t.onerror=()=>reject(Error('브라우저 원본 보관 공간이 부족합니다. 원본 파일은 변경하지 않았습니다.'))}),'브라우저 자료 저장',20000)}finally{db.close()}}
+  async function get(key){const db=await storage();try{return await bounded(new Promise((resolve,reject)=>{const r=db.transaction('files').objectStore('files').get(key);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(Error('보관 자료를 읽을 수 없습니다.'))}),'브라우저 자료 읽기')}finally{db.close()}}
   function jpeg(canvas,quality){return new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(Error('이미지 사본을 만들 수 없습니다.')),'image/jpeg',quality))}
   async function openPdf(file){const lib=await pdfjs();return lib.getDocument({data:new Uint8Array(await file.arrayBuffer()),isEvalSupported:false,cMapUrl:'/static/vendor/cmaps/',cMapPacked:true,standardFontDataUrl:'/static/vendor/standard_fonts/'}).promise}
   function textFromItems(items){let text='',lastY=null;for(const x of items){if(!x.str)continue;const y=x.transform[5];if(lastY!==null&&Math.abs(y-lastY)>3)text+='\n';else if(text&&!text.endsWith('\n'))text+=' ';text+=x.str;if(x.hasEOL)text+='\n';lastY=y}return text}
@@ -82,7 +83,7 @@
     const db=await storage();try{await new Promise((resolve,reject)=>{const t=db.transaction('files','readwrite');t.objectStore('files').delete(prepared.pending);t.oncomplete=resolve;t.onerror=reject})}finally{db.close()}
   }
   async function saveSnapshot(id,snapshot){const record=await get(id);if(!record)throw Error('브라우저 보관본이 없습니다. 원본을 다시 등록해 주세요.');await store(id,{...record,snapshot});}
-  async function listExams(){const db=await storage();try{return await new Promise((resolve,reject)=>{const r=db.transaction('files').objectStore('files').getAll();r.onsuccess=()=>resolve(r.result.filter(x=>x.snapshot).map(x=>x.snapshot));r.onerror=reject})}finally{db.close()}}
+  async function listExams(){const db=await storage();try{return await bounded(new Promise((resolve,reject)=>{const r=db.transaction('files').objectStore('files').getAll();r.onsuccess=()=>resolve(r.result.filter(x=>x.snapshot).map(x=>x.snapshot));r.onerror=()=>reject(Error('시험지 목록을 읽을 수 없습니다.'))}),'브라우저 목록 읽기')}finally{db.close()}}
   async function originalPage(id,page){
     if(cachedId!==id){if(cachedDoc)await cachedDoc.destroy();cachedDoc=null;cachedId=id;}
     const record=await get(id);if(!record)return null;

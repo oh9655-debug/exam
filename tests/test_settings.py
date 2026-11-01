@@ -147,3 +147,13 @@ def test_billing_window_keeps_totals(client):
 def test_non_ascii_password_returns_login_error(client):
     assert login(client,'틀린비밀번호').status_code==401
     assert login(client).status_code==200
+
+
+def test_estimate_does_not_require_exam_files(client):
+    assert post(client,'/api/ai/estimate',{'pages':5}).status_code==401
+    login(client)
+    response=post(client,'/api/ai/estimate',{'pages':5})
+    assert response.status_code==200
+    assert response.json['pages']==5 and response.json['estimated_usd']>0
+    for pages in [0,11,'5',True]:
+        assert post(client,'/api/ai/estimate',{'pages':pages}).status_code==400
