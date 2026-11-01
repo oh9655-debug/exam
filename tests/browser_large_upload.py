@@ -28,6 +28,7 @@ with tempfile.TemporaryDirectory() as temp:
         page=browser.new_page(viewport={'width':1400,'height':1000})
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         page.goto('http://127.0.0.1:5000')
+        page.locator('#start-ai').uncheck()
         page.locator('[name=file]').set_input_files(str(path))
         page.locator('[name=school]').fill('큰 파일 검증중')
         with page.expect_response(lambda r:r.url.endswith('/api/exams') and r.request.method=='POST',timeout=120000) as response:
@@ -58,6 +59,7 @@ with tempfile.TemporaryDirectory() as temp:
         large_pix.save(image_path)
         assert image_path.stat().st_size>3*1024*1024
         page.goto('http://127.0.0.1:5000')
+        page.locator('#start-ai').uncheck()
         page.locator('[name=file]').set_input_files(str(image_path))
         page.locator('[name=school]').fill('큰 이미지 검증')
         with page.expect_response(lambda r:r.url.endswith('/api/exams') and r.request.method=='POST',timeout=120000) as image_response:

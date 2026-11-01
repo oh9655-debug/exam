@@ -1,4 +1,5 @@
 const $=id=>document.getElementById(id);let prefs,working=false;
+const returnExam=new URLSearchParams(location.search).get('exam');
 const money=x=>'$'+Number(x).toFixed(5);
 function node(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n}
 function message(text,error=false){$('message').textContent=text;$('message').className=error?'error':'';$('message').hidden=false;clearTimeout(message.timer);message.timer=setTimeout(()=>$('message').hidden=true,7000)}
@@ -12,7 +13,7 @@ function captureModels(){const selectedIndex=$('model').selectedIndex;for(const 
 function showNote(){$('model-note').textContent=prefs.models.find(m=>m.id===$('model').value)?.note||'직접 등록한 모델입니다. 이미지·JSON 지원 여부와 단가를 확인하세요.'}
 $('model').onchange=showNote;
 $('add-model').onclick=()=>{captureModels();if(prefs.models.length>=5)return message('최대 5개까지 등록할 수 있습니다.',true);prefs.models.push({id:'custom-model-'+(prefs.models.length+1),name:'새 모델',input:0,cached:0,output:0,note:''});renderModels()};
-$('settings-form').onsubmit=e=>{e.preventDefault();action(e.submitter,async()=>{captureModels();await api('/api/admin/settings','PUT',{model:prefs.model,models:prefs.models,key:$('api-key').value,new_password:$('new-password').value});$('api-key').value='';$('new-password').value='';await load();message('설정을 저장했습니다. 대시보드에서 시험지를 열고 AI 분석을 시작하세요.')})};
+$('settings-form').onsubmit=e=>{e.preventDefault();action(e.submitter,async()=>{captureModels();await api('/api/admin/settings','PUT',{model:prefs.model,models:prefs.models,key:$('api-key').value,new_password:$('new-password').value});$('api-key').value='';$('new-password').value='';await load();if(returnExam&&/^[0-9a-f]{32}$/.test(returnExam)&&prefs.key_configured){location.href='/?exam='+returnExam+'&start=1';return}message('설정을 저장했습니다. 대시보드에서 시험지를 열고 AI 분석을 시작하세요.')})};
 $('delete-key').onclick=()=>{if(!confirm('이 브라우저에 저장된 API 키를 삭제할까요?'))return;action($('delete-key'),async()=>{await api('/api/admin/settings','PUT',{delete_key:true});await load();message('API 키를 삭제했습니다.')})};
 $('logout').onclick=()=>action($('logout'),async()=>{await api('/api/admin/logout','POST',{});lock()});$('refresh').onclick=()=>action($('refresh'),load);
 function renderUsage(b){$('usage-metrics').replaceChildren();for(const [label,value]of [['누적 분석 호출',`${b.count}회`],['누적 추정 비용',money(b.usd)],['사용 토큰',((b.input||0)+(b.output||0)).toLocaleString()],['비용 확인 필요',`${b.unknown||0}건`]]){const c=node('div',undefined,'metric');c.append(node('small',label),node('b',value));$('usage-metrics').append(c)}$('usage-table').replaceChildren();$('usage-empty').hidden=!!b.recent.length;for(const r of b.recent){const tr=node('tr');for(const v of [new Date(r.at*1000).toLocaleString('ko-KR'),r.exam,r.model,`${r.input.toLocaleString()} / ${r.output.toLocaleString()}`,r.usd===null?'확인 필요':money(r.usd),r.status])tr.append(node('td',v));$('usage-table').append(tr)}}
