@@ -14,7 +14,7 @@ os.environ['EXAM_SESSION_SECRET']='synthetic-test-server-session-secret-12345678
 
 def fake_vision(images,metadata,**kwargs):
     if kwargs.get('on_usage'):kwargs['on_usage']({'prompt_tokens':100,'completion_tokens':200})
-    return [dict(number='1',text='모형 AI 문항',page_start=1,page_end=1,points=5,unit='문자와 식',subunit='',achievement='',form='단답형',kind='계산',concepts='일차방정식',feature='기본형',factors=[1,1,1,1,1],reason='실제 과금 없는 회귀 검증용 AI 응답',warning='모형 응답',status='검토 필요')]
+    return [dict(number=1,text='모형 AI 문항',page_start=1,page_end=1,points=5,unit='문자와 식',subunit='',achievement=None,form='단답형',kind='계산',concepts=['일차방정식'],feature='기본형',factors=[1,1,1,1,1],reason=['실제 과금 없는 회귀 검증용 AI 응답'],warning='모형 응답',status='검토 필요')]
 
 application.vision_questions=fake_vision
 

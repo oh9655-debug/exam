@@ -1,6 +1,7 @@
 """Conservative local extraction and explicitly enabled vision analysis."""
 import base64
 import json
+import math
 import os
 import re
 import urllib.request
@@ -47,6 +48,66 @@ def local_questions(pages):
     return questions
 
 
+def normalize_ai_question(raw):
+    """Normalize representation only; never invent mathematics or difficulty."""
+    if not isinstance(raw,dict): raise ValueError('AI 문항 항목이 객체가 아닙니다.')
+    q=dict(raw); notes=[]
+    def text(value):
+        if value is None:return ''
+        if isinstance(value,str):return value
+        if isinstance(value,list):return '\n'.join(text(x) for x in value)
+        if isinstance(value,dict):return '\n'.join(str(k)+': '+text(v) for k,v in value.items())
+        if type(value) in (int,float) and math.isfinite(value):return str(int(value)) if float(value).is_integer() else str(value)
+        return json.dumps(value,ensure_ascii=False)
+    for key in ['number','text','unit','subunit','achievement','form','kind','concepts','feature','reason','warning']:
+        value=q.get(key)
+        if not isinstance(value,str):notes.append(key)
+        q[key]=text(value)
+    if not q['number'].strip():q['number']='미확인';notes.append('문항 번호 미확인')
+    if not q['text'].strip():
+        q['text']='[원문 인식 실패: 원본 시험지에서 문항 내용을 확인하세요.]'
+        q['factors']=None;notes.append('원문 인식 실패 · 난이도 미평가')
+    q['unit']=q['unit'] or '미분류';q['kind']=q['kind'] or '미분류';q['form']=q['form'] or '미확인'
+    for key in ['page_start','page_end']:
+        value=q.get(key)
+        if isinstance(value,str) and value.strip().isdigit():q[key]=int(value);notes.append(key)
+        elif type(value) is float and value.is_integer():q[key]=int(value);notes.append(key)
+    if isinstance(q.get('points'),str):
+        value=q['points'].strip()
+        match=re.fullmatch(r'(\d+(?:\.\d+)?)\s*점?',value)
+        if match:q['points']=float(match[1]);notes.append('points')
+        elif value in ('','미확인','알 수 없음'):q['points']=None;notes.append('배점 미확인')
+    factors=q.get('factors')
+    if isinstance(factors,dict) and all(k in factors for k in FACTOR_NAMES):
+        factors=[factors[k] for k in FACTOR_NAMES];notes.append('factors')
+    if isinstance(factors,list):
+        converted=[]
+        for x in factors:
+            if isinstance(x,str) and re.fullmatch('[0-4]',x):converted.append(int(x));notes.append('factors')
+            elif type(x) is float and x.is_integer():converted.append(int(x));notes.append('factors')
+            else:converted.append(x)
+        q['factors']=converted
+    elif factors is None:q['factors']=None
+    if q.get('factors') is not None:difficulty(q['factors'])
+    if q.get('factors') is not None and not q['reason'].strip():
+        q['factors']=None;notes.append('평가 근거 없음 · 난이도 미평가')
+    q['source']='ai';q['status']='검토 필요';q.pop('override_level',None)
+    if notes:
+        q['warning']=(q['warning']+'\n응답 형식 정리: '+', '.join(dict.fromkeys(notes))+'. 원본과 대조해 주세요.').strip()
+        q['_raw_response']=raw
+    if not q['warning']:q['warning']='AI 제안입니다. 원본 및 풀이를 교사가 확인하세요.'
+    return q
+
+
+def question_schema(page_count):
+    properties={name:{'type':'string'} for name in ['number','text','unit','subunit','achievement','form','kind','concepts','feature','reason','warning']}
+    properties['form']['enum']=['객관식','단답형','서술형','미확인']
+    properties['kind']['enum']=['개념','계산','응용','추론','미분류']
+    properties.update(page_start={'type':'integer','minimum':1,'maximum':page_count},page_end={'type':'integer','minimum':1,'maximum':page_count},points={'type':['number','null'],'minimum':0,'maximum':100},factors={'anyOf':[{'type':'array','items':{'type':'integer','minimum':0,'maximum':4},'minItems':5,'maxItems':5},{'type':'null'}]})
+    question={'type':'object','properties':properties,'required':list(properties),'additionalProperties':False}
+    return {'type':'json_schema','json_schema':{'name':'exam_questions','strict':True,'schema':{'type':'object','properties':{'questions':{'type':'array','items':question}},'required':['questions'],'additionalProperties':False}}}
+
+
 def vision_questions(images, metadata, *, key=None, model=None, on_usage=None):
     key = key or os.environ.get('EXAM_OPENAI_API_KEY', '')
     if not key:
@@ -64,6 +125,8 @@ warning(인식 또는 교육과정 불확실성), factors(개념 복잡성, 추�
     content = [{'type': 'text', 'text': instructions + json.dumps(metadata, ensure_ascii=False)}]
     content += [{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(p).decode()}} for p in images]
     payload = dict(model=model or os.environ.get('EXAM_OPENAI_MODEL', 'gpt-4.1-mini'), messages=[{'role': 'user', 'content': content}], response_format={'type': 'json_object'})
+    if payload['model'] in ('gpt-4.1-mini','gpt-4.1','gpt-5-mini'):
+        payload['response_format']=question_schema(len(images))
     payload['max_completion_tokens'] = 12000
     if payload['model'].startswith('gpt-5'):
         payload['reasoning_effort'] = 'low'
@@ -83,12 +146,7 @@ warning(인식 또는 교육과정 불확실성), factors(개념 복잡성, 추�
     items = json.loads(result['choices'][0]['message']['content'])['questions']
     if not isinstance(items, list) or len(items) > 200:
         raise ValueError('AI 응답의 문항 목록이 올바르지 않습니다.')
-    for q in items:
-        if not isinstance(q, dict) or not isinstance(q.get('text'), str) or not q['text'].strip():
-            raise ValueError('AI 응답에 문항 원문이 없습니다.')
-        if q.get('factors') is not None and not str(q.get('reason', '')).strip():
-            raise ValueError('난이도 평가 근거가 없는 AI 응답은 확정하지 않습니다.')
-        q.update(source='ai', status='검토 필요')
-        # Unsupported certainty is never promoted to teacher review.
-        q['warning'] = str(q.get('warning', '')) or 'AI 제안입니다. 원본 및 풀이를 교사가 확인하세요.'
+    if any(not isinstance(q,dict) for q in items):
+        raise ValueError('AI 응답의 문항 객체 형식을 확인할 수 없습니다.')
+    for q in items:q.update(source='ai',status='검토 필요')
     return items

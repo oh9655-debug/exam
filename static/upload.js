@@ -82,7 +82,8 @@
     await store(id,{file:prepared.original||prepared.file,transfer:prepared.file,snapshot,created:Date.now()});
     const db=await storage();try{await new Promise((resolve,reject)=>{const t=db.transaction('files','readwrite');t.objectStore('files').delete(prepared.pending);t.oncomplete=resolve;t.onerror=reject})}finally{db.close()}
   }
-  async function saveSnapshot(id,snapshot){const record=await get(id);if(!record)throw Error('브라우저 보관본이 없습니다. 원본을 다시 등록해 주세요.');await store(id,{...record,snapshot});}
+  async function saveSnapshot(id,snapshot){const record=await get(id);if(!record)throw Error('브라우저 보관본이 없습니다. 원본을 다시 등록해 주세요.');await store(id,{...record,snapshot,analysisDraft:snapshot.mode==='ai'?null:record.analysisDraft});}
+  async function saveAnalysisDraft(id,draft){const record=await get(id);if(record)await store(id,{...record,analysisDraft:draft})}
   async function listExams(){const db=await storage();try{return await bounded(new Promise((resolve,reject)=>{const r=db.transaction('files').objectStore('files').getAll();r.onsuccess=()=>resolve(r.result.filter(x=>x.snapshot).map(x=>x.snapshot));r.onerror=()=>reject(Error('시험지 목록을 읽을 수 없습니다.'))}),'브라우저 목록 읽기')}finally{db.close()}}
   async function originalPage(id,page){
     if(cachedId!==id){if(cachedDoc)await cachedDoc.destroy();cachedDoc=null;cachedId=id;}
@@ -93,5 +94,5 @@
     const blob=URL.createObjectURL(record.file);return {url:blob,original:true,revoke:true};
   }
   async function download(id){const record=await get(id);if(!record)return false;const url=URL.createObjectURL(record.file),a=document.createElement('a');a.href=url;a.download=record.file.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);return true;}
-  window.ExamUpload={optimize,attach,originalPage,download,get,saveSnapshot,listExams};
+  window.ExamUpload={optimize,attach,originalPage,download,get,saveSnapshot,listExams,saveAnalysisDraft};
 })();

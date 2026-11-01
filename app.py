@@ -14,7 +14,7 @@ import fitz
 from flask import Flask, abort, jsonify, render_template, request, send_file, session, g, make_response
 from werkzeug.exceptions import HTTPException
 from werkzeug.local import LocalProxy
-from analysis import difficulty, local_questions, vision_questions
+from analysis import difficulty, local_questions, vision_questions, normalize_ai_question
 from workspace import export_exam, restore_exam
 from settings import init_settings, require_admin, selected_model, estimate, record_usage, finish_usage
 
@@ -106,7 +106,7 @@ def create_app(data_dir=None):
         for name in ['number', 'text', 'unit', 'subunit', 'achievement', 'form', 'kind', 'concepts', 'feature', 'reason', 'warning']:
             value = q.get(name, '')
             if not isinstance(value, str) or len(value) > 30000:
-                raise ValueError('문항 텍스트 형식이 올바르지 않습니다.')
+                raise ValueError(f'문항 {q.get("number", "미확인")}의 {name} 항목이 문자열이 아니거나 길이 제한을 넘었습니다.')
             clean[name] = value
         if not clean['number'].strip() or not clean['text'].strip():
             raise ValueError('문항 번호와 원문을 입력하세요.')
@@ -320,27 +320,51 @@ def create_app(data_dir=None):
                 finish_usage(usage_id,False)
             raise
         try:
-            if not items:
-                raise ValueError('AI가 문항을 찾지 못했습니다. 원본을 확인하고 수동 입력하세요.')
-            cleaned = []
-            for q in items:
-                clean = validate(q,e['pages'])
-                clean.update(source='ai',ai_snapshot=dict(clean))
-                cleaned.append(clean)
-            with db() as conn:
-                conn.execute('DELETE FROM questions WHERE exam_id=?',(eid,))
-                for q in cleaned:
-                    conn.execute('INSERT INTO questions VALUES(?,?,?)',(uuid.uuid4().hex,eid,json.dumps(q,ensure_ascii=False)))
-                conn.execute("UPDATE exams SET mode='ai',notice=? WHERE id=?",('AI 제안입니다. 교사 검토 후 확정하세요.',eid))
+            store_ai_items(eid,e,items)
             if usage_id: finish_usage(usage_id,True)
             return jsonify(ok=True,billing=session.get('billing',{}))
+        except ValueError as error:
+            if usage_id: finish_usage(usage_id,False)
+            return jsonify(error=str(error),analysis_draft={'questions':items,'usage_id':usage_id},billing=session.get('billing',{})),400
         except Exception:
             if usage_id: finish_usage(usage_id,False)
             raise
 
+    def store_ai_items(eid,e,items):
+        if not isinstance(items,list) or not 1<=len(items)<=200:
+            raise ValueError('AI가 문항 목록을 반환하지 못했습니다.')
+        cleaned=[]
+        for raw in items:
+            q=normalize_ai_question(raw)
+            clean=validate(q,e['pages'])
+            snapshot=dict(clean)
+            if '_raw_response' in q:snapshot['raw_response']=q['_raw_response']
+            clean.update(source='ai',ai_snapshot=snapshot)
+            cleaned.append(clean)
+        with db() as conn:
+            conn.execute('DELETE FROM questions WHERE exam_id=?',(eid,))
+            for q in cleaned:
+                conn.execute('INSERT INTO questions VALUES(?,?,?)',(uuid.uuid4().hex,eid,json.dumps(q,ensure_ascii=False)))
+            conn.execute("UPDATE exams SET mode='ai',notice=? WHERE id=?",('AI 분석 제안입니다. 원본·배점·난이도 근거를 교사가 확인하세요.',eid))
+
+    @app.post('/api/exams/<eid>/recover')
+    def recover_analysis(eid):
+        e=exam_record(eid)
+        with db() as conn:
+            rows=conn.execute('SELECT data FROM questions WHERE exam_id=?',(eid,)).fetchall()
+            edited=conn.execute('SELECT 1 FROM revisions r JOIN questions q ON q.id=r.question_id WHERE q.exam_id=? LIMIT 1',(eid,)).fetchone()
+        if edited or any(json.loads(row['data'])['source']!='local' for row in rows):
+            raise ValueError('수정한 문항을 덮어쓰지 않습니다. 별도 시험지로 등록해 주세요.')
+        payload=input_data() or {}
+        store_ai_items(eid,e,payload.get('questions'))
+        uid=payload.get('usage_id')
+        if uid and any(row.get('id')==uid and row.get('exam')==eid[:8] for row in session.get('billing',{}).get('recent',[])):
+            finish_usage(uid,True)
+        return jsonify(ok=True,recovered=True)
+
     @app.post('/api/workspace')
     def portable_workspace():
-        allowed={'detail','page_image','original','add_question','update_question','delete_question','history','analysis_estimate','analyze'}
+        allowed={'detail','page_image','original','add_question','update_question','delete_question','history','analysis_estimate','analyze','recover_analysis'}
         target=request.form.get('path','')
         method=request.form.get('method','GET').upper()
         if method not in ('GET','POST','PATCH','DELETE'):
@@ -361,7 +385,7 @@ def create_app(data_dir=None):
         try: g.workspace_payload=json.loads(request.form.get('payload','null'))
         except ValueError: raise ValueError('문항 변경 내용을 읽지 못했습니다.')
         result=make_response(app.view_functions[endpoint](**values))
-        if not result.is_json: return result
+        if result.status_code>=400 or not result.is_json: return result
         return jsonify(result=result.get_json(),exam=export_exam(eid,db,exam_record)),result.status_code
 
     return app
